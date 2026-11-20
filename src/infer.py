@@ -70,14 +70,44 @@ def run_on_webcam(model, classes, device, sorter: SimulatedSorter, interval_s: f
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Could not open webcam (index 0). Check camera permissions.")
+
+    # Right after permission is granted (or on some drivers generally), the
+    # camera can take a moment to warm up -- the first few reads may fail
+    # even though the device opened successfully. Retry briefly instead of
+    # silently exiting on the first failed frame.
+    warm_up_deadline = time.time() + 5.0
+    ok, frame = cap.read()
+    while not ok and time.time() < warm_up_deadline:
+        time.sleep(0.2)
+        ok, frame = cap.read()
+    if not ok:
+        cap.release()
+        raise RuntimeError(
+            "Webcam opened but never returned a frame after 5s. Try unplugging/"
+            "reopening the app using the camera elsewhere, or check System "
+            "Settings > Privacy & Security > Camera again."
+        )
+
     print("Webcam demo running. Press 'q' in the preview window to quit.")
     last_infer = 0.0
     label, conf = "-", 0.0
+    consecutive_failures = 0
+    first_loop = True
     try:
         while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
+            if first_loop:
+                # already have a good frame from the warm-up read above
+                first_loop = False
+            else:
+                ok, frame = cap.read()
+                if not ok:
+                    consecutive_failures += 1
+                    if consecutive_failures > 30:  # ~a few seconds of no frames
+                        print("Lost the camera feed (no frames for a while). Stopping.")
+                        break
+                    time.sleep(0.1)
+                    continue
+            consecutive_failures = 0
             now = time.time()
             if now - last_infer >= interval_s:
                 import cv2 as _cv2
