@@ -56,14 +56,28 @@ def build_dataloaders(data_dir: Path, batch_size: int, img_size: int = 224):
 
 
 def build_model(num_classes: int, device: torch.device):
-    model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V2)
-    # Freeze the pretrained feature extractor, only train the new head.
-    # This is the right call for a small dataset (~400-600 images/class)
-    # and a 2-week timeline: far less overfitting risk than fine-tuning
-    # the whole network, and trains in minutes on CPU.
-    for param in model.features.parameters():
-        param.requires_grad = False
+    try:
+        model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V2)
+        pretrained = True
+    except Exception as e:
+        # Some sandboxed/offline environments block download.pytorch.org.
+        # Fall back to training from scratch rather than failing outright
+        # -- on an unrestricted machine the pretrained path above will work.
+        print(f"Could not download pretrained weights ({e}); training from scratch instead.")
+        model = models.mobilenet_v2(weights=None)
+        pretrained = False
+
     model.classifier[1] = nn.Linear(model.last_channel, num_classes)
+
+    if pretrained:
+        # Freeze the pretrained feature extractor, only train the new head.
+        # This is the right call for a small dataset (~400-600 images/class)
+        # and a 2-week timeline: far less overfitting risk than fine-tuning
+        # the whole network, and trains in minutes on CPU.
+        for param in model.features.parameters():
+            param.requires_grad = False
+    # else: no pretrained features worth freezing, train the whole network.
+
     return model.to(device)
 
 
@@ -104,7 +118,11 @@ def main():
     )
     model = build_model(len(classes), device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.classifier.parameters(), lr=args.lr)
+    # Only optimize params that require grad: just the head when pretrained
+    # features are frozen, or the whole network when training from scratch.
+    optimizer = torch.optim.Adam(
+        (p for p in model.parameters() if p.requires_grad), lr=args.lr
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2)
 
     best_val_acc = 0.0
@@ -142,7 +160,7 @@ def main():
     print("Charter target: >= 85%. " + ("MET" if test_acc >= 0.85 else "NOT YET MET"))
 
     with open(args.out.with_suffix(".history.json"), "w") as f:
-        json.dump({"history": history, "test_acc": test_acc, "classes": classes}, f, indent=2)
+     json.dump({"history": history, "test_acc": test_acc, "classes": classes}, f, indent=2)
 
 
 if __name__ == "__main__":
